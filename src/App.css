@@ -1,0 +1,23 @@
+/* تنسيقات إضافية للتطبيق */
+.app {
+  min-height: 100vh;
+  background-color: #0E1116;
+}
+
+/* تحسين العناصر */
+.card {
+  transition: all 0.3s ease;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+}
+
+/* تنسيق الأزرار */
+.btn-buy {
+  background: linear-gradient(135deg, #2EA043, #1e7a34);
+}
+
+.btn-sell {
+  background: linear-gradient(135deg, #DA3633, #a82825);
+}
