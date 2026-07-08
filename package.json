@@ -1,11 +1,8 @@
-json
 {
   "name": "sandoq-trading",
   "version": "1.0.0",
   "private": true,
-  "description": "تطبيق تداول شخصي متصل بـ Pionex مع بيانات حقيقية",
-  "author": "Your Name",
-  "license": "MIT",
+  "description": "تطبيق تداول شخصي متصل بـ Pionex",
   "dependencies": {
     "crypto-js": "^4.2.0",
     "react": "^18.2.0",
@@ -19,9 +16,7 @@ json
     "eject": "react-scripts eject"
   },
   "eslintConfig": {
-    "extends": [
-      "react-app"
-    ]
+    "extends": ["react-app"]
   },
   "browserslist": {
     "production": [
@@ -34,11 +29,5 @@ json
       "last 1 firefox version",
       "last 1 safari version"
     ]
-  },
-  "keywords": [
-    "trading",
-    "pionex",
-    "crypto",
-    "react"
-  ]
+  }
 }
