@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: sandoq-trading
-    runtime: static
-    buildCommand: npm run build
-    staticPublishPath: build
-    envVars:
-      - key: NODE_VERSION
-        value: 18.17.0
