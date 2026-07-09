@@ -1,6 +1,6 @@
 // =============================================================
 // Sandoq — Personal Trading Demo (Web version, React + CRA)
-// Pionex-style data source, swappable via CONFIG.dataSource below
+// Live prices via Binance public WebSocket (market data only)
 // =============================================================
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import CryptoJS from "crypto-js";
@@ -10,33 +10,18 @@ import CryptoJS from "crypto-js";
 // -----------------------------
 const CONFIG = {
   dataSource: {
-    name: "pionex",
+    name: "binance-ws (بيانات) + pionex (هدف التنفيذ لاحقاً)",
     baseURL: "https://api.pionex.com",
     rest: {
       ticker: "/api/v1/market/tickers",
       order: "/api/v1/trade/order",
     },
-    ws: {
-      url: "SIMULATED",
-      pingIntervalMs: 20000,
-    },
-    symbols: {
-      BTCUSDT: "BTC_USDT",
-      ETHUSDT: "ETH_USDT",
-      BNBUSDT: "BNB_USDT",
-      SOLUSDT: "SOL_USDT",
-      DOGEUSDT: "DOGE_USDT",
-      SHIBUSDT: "SHIB_USDT",
-      PEPEUSDT: "PEPE_USDT",
-    },
   },
-
   risk: {
     riskPerTradePct: 1.0,
     dailyLossLimitPct: 3.0,
     maxOpenTrades: 3,
   },
-
   theme: {
     bg: "#0E1116",
     card: "#161B22",
@@ -136,21 +121,32 @@ async function saveUserConfig(cfg) {
 }
 
 // =============================================================
-// 5) API LAYER (REST) — يدعم التبديل عبر CONFIG.dataSource
+// 5) BINANCE PUBLIC DATA — بيانات سوق عامة فقط (بلا حساب/تداول)
 // =============================================================
+const BINANCE_STREAM_MAP = {
+  BTCUSDT: "btcusdt",
+  ETHUSDT: "ethusdt",
+  BNBUSDT: "bnbusdt",
+  SOLUSDT: "solusdt",
+  DOGEUSDT: "dogeusdt",
+  SHIBUSDT: "shibusdt",
+  PEPEUSDT: "pepeusdt",
+};
+
+const FALLBACK_SEED = {
+  BTCUSDT: 63000, ETHUSDT: 3400, BNBUSDT: 590, SOLUSDT: 145,
+  DOGEUSDT: 0.14, SHIBUSDT: 0.000023, PEPEUSDT: 0.0000085,
+};
+
 async function fetchPriceREST(symbol) {
-  const seed = {
-    BTCUSDT: 67000,
-    ETHUSDT: 3500,
-    BNBUSDT: 600,
-    SOLUSDT: 150,
-    DOGEUSDT: 0.15,
-    SHIBUSDT: 0.000024,
-    PEPEUSDT: 0.000009,
-  };
-  const base = seed[symbol] ?? 1;
-  const drift = (Math.random() - 0.5) * 0.004;
-  return base * (1 + drift);
+  try {
+    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+    if (!res.ok) throw new Error("REST fetch failed");
+    const data = await res.json();
+    return parseFloat(data.price);
+  } catch (e) {
+    return FALLBACK_SEED[symbol] ?? 1;
+  }
 }
 
 async function placeOrder({ symbol, side, qty, idempotencyKey }) {
@@ -174,19 +170,74 @@ async function placeOrder({ symbol, side, qty, idempotencyKey }) {
 }
 
 // =============================================================
-// 6) "WEBSOCKET" LAYER — محاكاة عبر setInterval + fallback REST
+// 6) WEBSOCKET LAYER — اتصال حي حقيقي بـ Binance (بيانات عامة)
 // =============================================================
 function connectWS(onTick) {
-  if (CONFIG.dataSource.ws.url !== "SIMULATED") {
-    // اربط WebSocket حقيقي هنا لاحقاً
-  }
-  const timer = setInterval(async () => {
-    for (const c of COINS) {
-      const p = await fetchPriceREST(c.symbol);
-      onTick({ symbol: c.symbol, price: p, ts: Date.now() });
+  const streams = Object.values(BINANCE_STREAM_MAP)
+    .map((s) => `${s}@trade`)
+    .join("/");
+  const url = `wss://stream.binance.com:9443/stream?streams=${streams}`;
+
+  let ws = null;
+  let closedByUser = false;
+  let reconnectDelay = 2000;
+
+  function connect() {
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      scheduleReconnect();
+      return;
     }
-  }, 1500);
-  return () => clearInterval(timer);
+
+    ws.onopen = () => {
+      reconnectDelay = 2000;
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        const trade = msg.data;
+        if (!trade || !trade.s || !trade.p) return;
+        onTick({
+          symbol: trade.s,
+          price: parseFloat(trade.p),
+          ts: trade.T || Date.now(),
+        });
+      } catch (e) {
+        // تجاهل رسائل غير متوقعة
+      }
+    };
+
+    ws.onerror = () => {};
+
+    ws.onclose = () => {
+      if (!closedByUser) scheduleReconnect();
+    };
+  }
+
+  function scheduleReconnect() {
+    setTimeout(() => {
+      if (!closedByUser) {
+        reconnectDelay = Math.min(reconnectDelay * 1.5, 15000);
+        connect();
+      }
+    }, reconnectDelay);
+  }
+
+  (async () => {
+    for (const symbol of Object.keys(BINANCE_STREAM_MAP)) {
+      const price = await fetchPriceREST(symbol);
+      onTick({ symbol, price, ts: Date.now() });
+    }
+  })();
+
+  connect();
+
+  return () => {
+    closedByUser = true;
+    if (ws) ws.close();
+  };
 }
 
 // =============================================================
@@ -456,7 +507,7 @@ export default function App() {
       <div style={{ maxWidth: 480, margin: "0 auto", padding: 16 }}>
         <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Sandoq · صندوق التداول</h1>
         <p style={{ fontSize: 12, color: CONFIG.theme.textMuted, marginBottom: 16 }}>
-          ديمو لمستخدم واحد · مصدر البيانات: {CONFIG.dataSource.name}
+          ديمو لمستخدم واحد · أسعار حية من Binance · تنفيذ محلي وهمي
         </p>
 
         {message && (
@@ -576,36 +627,4 @@ export default function App() {
                 fontWeight: 700,
                 opacity: tradingHalted ? 0.5 : 1,
               }}
-            >
-              بيع
-            </button>
-          </div>
-        </div>
-
-        <div style={cardStyle}>
-          <div style={{ fontWeight: 700, marginBottom: 10 }}>سجل الصفقات ({trades.length})</div>
-          {trades.length === 0 && (
-            <div style={{ color: CONFIG.theme.textMuted, fontSize: 13 }}>لا توجد صفقات بعد.</div>
-          )}
-          {trades.map((t) => (
-            <TradeItem key={t.id} trade={t} currentPrice={prices[t.symbol]} onClose={closeTrade} />
-          ))}
-        </div>
-
-        <div style={cardStyle}>
-          <div style={{ fontWeight: 700, marginBottom: 8 }}>مفتاح API (اختياري — يُشفّر محلياً)</div>
-          <input
-            type="password"
-            placeholder="أدخل المفتاح إن أردت ربطاً حقيقياً"
-            style={{ ...inputStyle, width: "100%" }}
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
-          <div style={{ fontSize: 12, color: CONFIG.theme.textMuted, marginTop: 8 }}>
-            يُخزَّن مشفّراً محلياً في هذا المتصفح. في وضع الديمو لا يُستعمل لإرسال أوامر حقيقية.
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+           
