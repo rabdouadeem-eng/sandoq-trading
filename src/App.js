@@ -627,4 +627,36 @@ export default function App() {
                 fontWeight: 700,
                 opacity: tradingHalted ? 0.5 : 1,
               }}
-           
+            >
+              بيع
+            </button>
+          </div>
+        </div>
+
+        <div style={cardStyle}>
+          <div style={{ fontWeight: 700, marginBottom: 10 }}>سجل الصفقات ({trades.length})</div>
+          {trades.length === 0 && (
+            <div style={{ color: CONFIG.theme.textMuted, fontSize: 13 }}>لا توجد صفقات بعد.</div>
+          )}
+          {trades.map((t) => (
+            <TradeItem key={t.id} trade={t} currentPrice={prices[t.symbol]} onClose={closeTrade} />
+          ))}
+        </div>
+
+        <div style={cardStyle}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>مفتاح API (اختياري — يُشفّر محلياً)</div>
+          <input
+            type="password"
+            placeholder="أدخل المفتاح إن أردت ربطاً حقيقياً"
+            style={{ ...inputStyle, width: "100%" }}
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+          />
+          <div style={{ fontSize: 12, color: CONFIG.theme.textMuted, marginTop: 8 }}>
+            يُخزَّن مشفّراً محلياً في هذا المتصفح. في وضع الديمو لا يُستعمل لإرسال أوامر حقيقية.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
