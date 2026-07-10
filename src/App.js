@@ -11,11 +11,6 @@ import CryptoJS from "crypto-js";
 const CONFIG = {
   dataSource: {
     name: "binance-ws (بيانات) + pionex (هدف التنفيذ لاحقاً)",
-    baseURL: "https://api.pionex.com",
-    rest: {
-      ticker: "/api/v1/market/tickers",
-      order: "/api/v1/trade/order",
-    },
   },
   risk: {
     riskPerTradePct: 1.0,
@@ -47,8 +42,10 @@ const COINS = [
   { symbol: "PEPEUSDT", type: "meme", name: "Pepe", icon: "P" },
 ];
 
+const MAX_HISTORY_POINTS = 60;
+
 // =============================================================
-// 3) SECURE STORAGE (web) — تشفير محلي بسيط عبر crypto-js
+// 3) SECURE STORAGE (web)
 // =============================================================
 const SECRET_KEY_STORAGE = "sandoq_device_key";
 
@@ -92,7 +89,7 @@ async function loadApiKey() {
 }
 
 // =============================================================
-// 4) STORAGE — سجل الصفقات + الإعدادات (localStorage)
+// 4) STORAGE
 // =============================================================
 const K_TRADES = "sandoq_trades";
 const K_CONFIG = "sandoq_user_config";
@@ -121,7 +118,7 @@ async function saveUserConfig(cfg) {
 }
 
 // =============================================================
-// 5) BINANCE PUBLIC DATA — بيانات سوق عامة فقط (بلا حساب/تداول)
+// 5) BINANCE PUBLIC DATA
 // =============================================================
 const BINANCE_STREAM_MAP = {
   BTCUSDT: "btcusdt",
@@ -170,7 +167,7 @@ async function placeOrder({ symbol, side, qty, idempotencyKey }) {
 }
 
 // =============================================================
-// 6) WEBSOCKET LAYER — اتصال حي حقيقي بـ Binance (بيانات عامة)
+// 6) WEBSOCKET LAYER
 // =============================================================
 function connectWS(onTick) {
   const streams = Object.values(BINANCE_STREAM_MAP)
@@ -204,9 +201,7 @@ function connectWS(onTick) {
           price: parseFloat(trade.p),
           ts: trade.T || Date.now(),
         });
-      } catch (e) {
-        // تجاهل رسائل غير متوقعة
-      }
+      } catch (e) {}
     };
 
     ws.onerror = () => {};
@@ -276,8 +271,59 @@ function formatPrice(p) {
 }
 
 // =============================================================
-// 8) UI COMPONENTS (HTML/React عادية)
+// 8) UI COMPONENTS
 // =============================================================
+function PriceChart({ history }) {
+  const width = 448;
+  const height = 140;
+  const padding = 8;
+
+  if (!history || history.length < 2) {
+    return (
+      <div
+        style={{
+          height,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: CONFIG.theme.textMuted,
+          fontSize: 13,
+        }}
+      >
+        بانتظار بيانات كافية للرسم...
+      </div>
+    );
+  }
+
+  const prices = history.map((h) => h.price);
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const range = max - min || 1;
+
+  const points = history.map((h, i) => {
+    const x = padding + (i / (history.length - 1)) * (width - padding * 2);
+    const y = padding + (1 - (h.price - min) / range) * (height - padding * 2);
+    return `${x},${y}`;
+  });
+
+  const pathD = "M" + points.join(" L");
+  const areaD =
+    pathD +
+    ` L${padding + (width - padding * 2)},${height - padding} L${padding},${height - padding} Z`;
+
+  const last = prices[prices.length - 1];
+  const first = prices[0];
+  const isUp = last >= first;
+  const lineColor = isUp ? CONFIG.theme.buy : CONFIG.theme.sell;
+
+  return (
+    <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
+      <path d={areaD} fill={lineColor} opacity="0.08" />
+      <path d={pathD} fill="none" stroke={lineColor} strokeWidth="2" />
+    </svg>
+  );
+}
+
 function PriceRow({ coin, price, prevPrice, onSelect, selected }) {
   const dir = price != null && prevPrice != null ? (price >= prevPrice ? 1 : -1) : 0;
   const color = dir === 1 ? CONFIG.theme.buy : dir === -1 ? CONFIG.theme.sell : CONFIG.theme.text;
@@ -406,6 +452,7 @@ const ghostBtnStyle = {
 export default function App() {
   const [prices, setPrices] = useState({});
   const [prevPrices, setPrevPrices] = useState({});
+  const [priceHistory, setPriceHistory] = useState({});
   const [trades, setTrades] = useState([]);
   const [userCfg, setUserCfg] = useState({ capital: 1000, riskPct: 1.0 });
   const [selected, setSelected] = useState(COINS[0]);
@@ -427,6 +474,11 @@ export default function App() {
       setPrices((prev) => {
         setPrevPrices((pv) => ({ ...pv, [tick.symbol]: prev[tick.symbol] ?? pv[tick.symbol] }));
         return { ...prev, [tick.symbol]: tick.price };
+      });
+      setPriceHistory((prevHist) => {
+        const existing = prevHist[tick.symbol] || [];
+        const updated = [...existing, { price: tick.price, ts: tick.ts }].slice(-MAX_HISTORY_POINTS);
+        return { ...prevHist, [tick.symbol]: updated };
       });
     });
     return close;
@@ -502,6 +554,8 @@ export default function App() {
     showMessage("حُفظت", "تم حفظ الإعدادات والمفتاح مشفّر محلياً.");
   }
 
+  const selectedHistory = priceHistory[selected.symbol] || [];
+
   return (
     <div style={{ background: CONFIG.theme.bg, color: CONFIG.theme.text, minHeight: "100vh" }}>
       <div style={{ maxWidth: 480, margin: "0 auto", padding: 16 }}>
@@ -573,6 +627,16 @@ export default function App() {
           <button style={ghostBtnStyle} onClick={saveSettings}>
             حفظ الإعدادات
           </button>
+        </div>
+
+        <div style={cardStyle}>
+          <div style={{ fontWeight: 700, marginBottom: 10 }}>
+            شارت {selected.name} ({selected.symbol})
+          </div>
+          <PriceChart history={selectedHistory} />
+          <div style={{ fontSize: 11, color: CONFIG.theme.textMuted, marginTop: 6, textAlign: "center" }}>
+            آخر {selectedHistory.length} نقطة سعر حية
+          </div>
         </div>
 
         <div style={cardStyle}>
