@@ -1,6 +1,6 @@
 // =============================================================
 // Sandoq — Personal Trading Demo (Web version, React + CRA)
-// Live prices via Binance public WebSocket (market data only)
+// Live prices + candlestick chart via Binance public WebSocket
 // =============================================================
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import CryptoJS from "crypto-js";
@@ -42,7 +42,7 @@ const COINS = [
   { symbol: "PEPEUSDT", type: "meme", name: "Pepe", icon: "P" },
 ];
 
-const MAX_HISTORY_POINTS = 60;
+const MAX_CANDLES = 50;
 
 // =============================================================
 // 3) SECURE STORAGE (web)
@@ -146,6 +146,25 @@ async function fetchPriceREST(symbol) {
   }
 }
 
+async function fetchInitialKlines(symbol, limit = MAX_CANDLES) {
+  try {
+    const res = await fetch(
+      `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1m&limit=${limit}`
+    );
+    if (!res.ok) throw new Error("Klines fetch failed");
+    const data = await res.json();
+    return data.map((k) => ({
+      time: k[0],
+      open: parseFloat(k[1]),
+      high: parseFloat(k[2]),
+      low: parseFloat(k[3]),
+      close: parseFloat(k[4]),
+    }));
+  } catch (e) {
+    return [];
+  }
+}
+
 async function placeOrder({ symbol, side, qty, idempotencyKey }) {
   const cachedRaw = localStorage.getItem(`idem:${idempotencyKey}`);
   if (cachedRaw) return JSON.parse(cachedRaw);
@@ -167,13 +186,16 @@ async function placeOrder({ symbol, side, qty, idempotencyKey }) {
 }
 
 // =============================================================
-// 6) WEBSOCKET LAYER
+// 6) WEBSOCKET LAYER — شموع (klines) + صفقات فردية من Binance
 // =============================================================
-function connectWS(onTick) {
-  const streams = Object.values(BINANCE_STREAM_MAP)
+function connectKlineWS(onCandle, onTickerPrice) {
+  const klineStreams = Object.values(BINANCE_STREAM_MAP)
+    .map((s) => `${s}@kline_1m`)
+    .join("/");
+  const tradeStreams = Object.values(BINANCE_STREAM_MAP)
     .map((s) => `${s}@trade`)
     .join("/");
-  const url = `wss://stream.binance.com:9443/stream?streams=${streams}`;
+  const url = `wss://stream.binance.com:9443/stream?streams=${klineStreams}/${tradeStreams}`;
 
   let ws = null;
   let closedByUser = false;
@@ -194,18 +216,30 @@ function connectWS(onTick) {
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        const trade = msg.data;
-        if (!trade || !trade.s || !trade.p) return;
-        onTick({
-          symbol: trade.s,
-          price: parseFloat(trade.p),
-          ts: trade.T || Date.now(),
-        });
-      } catch (e) {}
+        const d = msg.data;
+        if (!d) return;
+
+        if (d.e === "kline" && d.k) {
+          const k = d.k;
+          onCandle({
+            symbol: d.s,
+            candle: {
+              time: k.t,
+              open: parseFloat(k.o),
+              high: parseFloat(k.h),
+              low: parseFloat(k.l),
+              close: parseFloat(k.c),
+            },
+          });
+        } else if (d.s && d.p) {
+          onTickerPrice({ symbol: d.s, price: parseFloat(d.p), ts: d.T || Date.now() });
+        }
+      } catch (e) {
+        // تجاهل رسائل غير متوقعة
+      }
     };
 
     ws.onerror = () => {};
-
     ws.onclose = () => {
       if (!closedByUser) scheduleReconnect();
     };
@@ -219,13 +253,6 @@ function connectWS(onTick) {
       }
     }, reconnectDelay);
   }
-
-  (async () => {
-    for (const symbol of Object.keys(BINANCE_STREAM_MAP)) {
-      const price = await fetchPriceREST(symbol);
-      onTick({ symbol, price, ts: Date.now() });
-    }
-  })();
 
   connect();
 
@@ -273,12 +300,12 @@ function formatPrice(p) {
 // =============================================================
 // 8) UI COMPONENTS
 // =============================================================
-function PriceChart({ history }) {
+function CandleChart({ candles }) {
   const width = 448;
-  const height = 140;
+  const height = 160;
   const padding = 8;
 
-  if (!history || history.length < 2) {
+  if (!candles || candles.length < 2) {
     return (
       <div
         style={{
@@ -295,31 +322,42 @@ function PriceChart({ history }) {
     );
   }
 
-  const prices = history.map((h) => h.price);
-  const min = Math.min(...prices);
-  const max = Math.max(...prices);
+  const highs = candles.map((c) => c.high);
+  const lows = candles.map((c) => c.low);
+  const min = Math.min(...lows);
+  const max = Math.max(...highs);
   const range = max - min || 1;
 
-  const points = history.map((h, i) => {
-    const x = padding + (i / (history.length - 1)) * (width - padding * 2);
-    const y = padding + (1 - (h.price - min) / range) * (height - padding * 2);
-    return `${x},${y}`;
-  });
+  const chartWidth = width - padding * 2;
+  const chartHeight = height - padding * 2;
+  const candleSlot = chartWidth / candles.length;
+  const candleWidth = Math.max(2, candleSlot * 0.6);
 
-  const pathD = "M" + points.join(" L");
-  const areaD =
-    pathD +
-    ` L${padding + (width - padding * 2)},${height - padding} L${padding},${height - padding} Z`;
-
-  const last = prices[prices.length - 1];
-  const first = prices[0];
-  const isUp = last >= first;
-  const lineColor = isUp ? CONFIG.theme.buy : CONFIG.theme.sell;
+  const yFor = (price) => padding + (1 - (price - min) / range) * chartHeight;
 
   return (
     <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
-      <path d={areaD} fill={lineColor} opacity="0.08" />
-      <path d={pathD} fill="none" stroke={lineColor} strokeWidth="2" />
+      {candles.map((c, i) => {
+        const x = padding + i * candleSlot + candleSlot / 2;
+        const isUp = c.close >= c.open;
+        const color = isUp ? CONFIG.theme.buy : CONFIG.theme.sell;
+        const bodyTop = yFor(Math.max(c.open, c.close));
+        const bodyBottom = yFor(Math.min(c.open, c.close));
+        const bodyHeight = Math.max(1, bodyBottom - bodyTop);
+
+        return (
+          <g key={c.time}>
+            <line x1={x} x2={x} y1={yFor(c.high)} y2={yFor(c.low)} stroke={color} strokeWidth="1" />
+            <rect
+              x={x - candleWidth / 2}
+              y={bodyTop}
+              width={candleWidth}
+              height={bodyHeight}
+              fill={color}
+            />
+          </g>
+        );
+      })}
     </svg>
   );
 }
@@ -452,7 +490,7 @@ const ghostBtnStyle = {
 export default function App() {
   const [prices, setPrices] = useState({});
   const [prevPrices, setPrevPrices] = useState({});
-  const [priceHistory, setPriceHistory] = useState({});
+  const [candleHistory, setCandleHistory] = useState({});
   const [trades, setTrades] = useState([]);
   const [userCfg, setUserCfg] = useState({ capital: 1000, riskPct: 1.0 });
   const [selected, setSelected] = useState(COINS[0]);
@@ -470,17 +508,43 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const close = connectWS((tick) => {
-      setPrices((prev) => {
-        setPrevPrices((pv) => ({ ...pv, [tick.symbol]: prev[tick.symbol] ?? pv[tick.symbol] }));
-        return { ...prev, [tick.symbol]: tick.price };
-      });
-      setPriceHistory((prevHist) => {
-        const existing = prevHist[tick.symbol] || [];
-        const updated = [...existing, { price: tick.price, ts: tick.ts }].slice(-MAX_HISTORY_POINTS);
-        return { ...prevHist, [tick.symbol]: updated };
-      });
-    });
+    (async () => {
+      const initial = {};
+      const initialPrices = {};
+      for (const coin of COINS) {
+        const candles = await fetchInitialKlines(coin.symbol);
+        initial[coin.symbol] = candles;
+        if (candles.length > 0) initialPrices[coin.symbol] = candles[candles.length - 1].close;
+      }
+      setCandleHistory(initial);
+      setPrices((p) => ({ ...p, ...initialPrices }));
+    })();
+
+    const close = connectKlineWS(
+      (data) => {
+        setCandleHistory((prev) => {
+          const list = prev[data.symbol] ? [...prev[data.symbol]] : [];
+          const lastIdx = list.length - 1;
+          if (lastIdx >= 0 && list[lastIdx].time === data.candle.time) {
+            list[lastIdx] = data.candle;
+          } else {
+            list.push(data.candle);
+            if (list.length > MAX_CANDLES) list.shift();
+          }
+          return { ...prev, [data.symbol]: list };
+        });
+        setPrices((prev) => {
+          setPrevPrices((pv) => ({ ...pv, [data.symbol]: prev[data.symbol] ?? pv[data.symbol] }));
+          return { ...prev, [data.symbol]: data.candle.close };
+        });
+      },
+      (tick) => {
+        setPrices((prev) => {
+          setPrevPrices((pv) => ({ ...pv, [tick.symbol]: prev[tick.symbol] ?? pv[tick.symbol] }));
+          return { ...prev, [tick.symbol]: tick.price };
+        });
+      }
+    );
     return close;
   }, []);
 
@@ -554,7 +618,7 @@ export default function App() {
     showMessage("حُفظت", "تم حفظ الإعدادات والمفتاح مشفّر محلياً.");
   }
 
-  const selectedHistory = priceHistory[selected.symbol] || [];
+  const selectedCandles = candleHistory[selected.symbol] || [];
 
   return (
     <div style={{ background: CONFIG.theme.bg, color: CONFIG.theme.text, minHeight: "100vh" }}>
@@ -631,11 +695,11 @@ export default function App() {
 
         <div style={cardStyle}>
           <div style={{ fontWeight: 700, marginBottom: 10 }}>
-            شارت {selected.name} ({selected.symbol})
+            شارت {selected.name} ({selected.symbol}) · 1 دقيقة
           </div>
-          <PriceChart history={selectedHistory} />
+          <CandleChart candles={selectedCandles} />
           <div style={{ fontSize: 11, color: CONFIG.theme.textMuted, marginTop: 6, textAlign: "center" }}>
-            آخر {selectedHistory.length} نقطة سعر حية
+            آخر {selectedCandles.length} شمعة (1 دقيقة لكل شمعة)
           </div>
         </div>
 
