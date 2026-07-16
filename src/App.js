@@ -4,6 +4,7 @@
 // =============================================================
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import CryptoJS from "crypto-js";
+import { useBotSignal, loadBotEnabled, saveBotEnabled } from "./useBotSignal";
 
 // -----------------------------
 // 1) CONFIG (swap in one place)
@@ -411,6 +412,20 @@ function TradeItem({ trade, currentPrice, onClose }) {
     >
       <div style={{ display: "flex", justifyContent: "space-between" }}>
         <span style={{ fontWeight: 700 }}>
+          {trade.source === "bot" && (
+            <span
+              style={{
+                fontSize: 10,
+                background: "#1F2530",
+                border: "1px solid #262C36",
+                borderRadius: 6,
+                padding: "2px 6px",
+                marginRight: 6,
+              }}
+            >
+              🤖 بوت
+            </span>
+          )}
           {trade.side === "BUY" ? "شراء" : "بيع"} {trade.symbol}
         </span>
         <span
@@ -497,6 +512,7 @@ export default function App() {
   const [stopPct, setStopPct] = useState("1.5");
   const [apiKey, setApiKey] = useState("");
   const [message, setMessage] = useState(null);
+  const [botEnabled, setBotEnabledState] = useState(loadBotEnabled());
 
   useEffect(() => {
     (async () => {
@@ -576,6 +592,90 @@ export default function App() {
     setTimeout(() => setMessage(null), 3500);
   }, []);
 
+  const coinsBySymbol = useMemo(
+    () => Object.fromEntries(COINS.map((c) => [c.symbol, c])),
+    []
+  );
+
+  const placeAuto = useCallback(
+    async (coin, side, reasons, confidence) => {
+      if (realized <= -dailyLimit) return;
+      if (openTradesCount(trades) >= CONFIG.risk.maxOpenTrades) return;
+
+      const coinPrice = prices[coin.symbol];
+      if (!coinPrice) return;
+
+      const s = parseFloat(stopPct) || 1.5;
+      const coinStop = +(
+        coinPrice * (side === "BUY" ? 1 - s / 100 : 1 + s / 100)
+      ).toFixed(8);
+
+      const qty = calcPositionSize({
+        capital: parseFloat(userCfg.capital) || 0,
+        riskPct: parseFloat(userCfg.riskPct) || 0,
+        entryPrice: coinPrice,
+        stopPrice: coinStop,
+      });
+      if (qty <= 0) return;
+
+      const idem = newIdempotencyKey();
+      const order = await placeOrder({
+        symbol: coin.symbol,
+        side,
+        qty,
+        idempotencyKey: idem,
+      });
+
+      const trade = {
+        id: order.orderId,
+        symbol: order.symbol,
+        side: order.side,
+        entry: order.avgPrice,
+        stop: coinStop,
+        qty: order.qty,
+        status: "OPEN",
+        openedAt: order.ts,
+        source: "bot",
+        botReasons: reasons,
+        botConfidence: confidence,
+      };
+
+      setTrades((prev) => {
+        const next = [trade, ...prev];
+        saveTrades(next);
+        return next;
+      });
+
+      showMessage(
+        "🤖 صفقة تلقائية",
+        `${side === "BUY" ? "شراء" : "بيع"} ${coin.name} بسعر ${formatPrice(
+          order.avgPrice
+        )} — ثقة ${(confidence * 100).toFixed(0)}%`
+      );
+    },
+    [trades, prices, stopPct, userCfg, realized, dailyLimit, showMessage]
+  );
+
+  const { lastSignals, lastError } = useBotSignal({
+    coinsBySymbol,
+    prices,
+    trades,
+    placeAuto,
+    enabled: botEnabled,
+  });
+
+  function toggleBot() {
+    const next = !botEnabled;
+    setBotEnabledState(next);
+    saveBotEnabled(next);
+    showMessage(
+      next ? "🤖 التداول التلقائي مفعّل" : "⏸️ التداول التلقائي متوقف",
+      next
+        ? "البوت غادي ينفذ صفقات وهمية تلقائيا حسب إشارات PRO-TRADING-BOT."
+        : "دابا خاصك تنفذ الصفقات يدويا."
+    );
+  }
+
   async function place(side) {
     if (tradingHalted) return showMessage("التداول متوقف", "تم بلوغ حد الخسارة اليومية.");
     if (openCount >= CONFIG.risk.maxOpenTrades)
@@ -642,6 +742,56 @@ export default function App() {
             <div style={{ fontSize: 13, color: CONFIG.theme.textMuted }}>{message.body}</div>
           </div>
         )}
+
+        <div style={cardStyle}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: botEnabled ? 10 : 0,
+            }}
+          >
+            <div>
+              <div style={{ fontWeight: 700 }}>🤖 التداول التلقائي (Bot)</div>
+              <div style={{ fontSize: 11, color: CONFIG.theme.textMuted }}>
+                مصدر: PRO-TRADING-BOT · {botEnabled ? "مفعّل" : "متوقف"}
+              </div>
+            </div>
+            <button
+              onClick={toggleBot}
+              style={{
+                ...ghostBtnStyle,
+                width: "auto",
+                marginTop: 0,
+                padding: "8px 16px",
+                borderColor: botEnabled ? CONFIG.theme.buy : CONFIG.theme.border,
+                color: botEnabled ? CONFIG.theme.buy : CONFIG.theme.text,
+              }}
+            >
+              {botEnabled ? "إيقاف" : "تفعيل"}
+            </button>
+          </div>
+
+          {botEnabled && lastSignals[selected.symbol] && (
+            <div style={{ fontSize: 12, color: CONFIG.theme.textMuted }}>
+              آخر إشارة لـ {selected.name}:{" "}
+              <b style={{ color: CONFIG.theme.text }}>
+                {lastSignals[selected.symbol].signal === "buy"
+                  ? "شراء"
+                  : lastSignals[selected.symbol].signal === "sell"
+                  ? "بيع"
+                  : "انتظار"}
+              </b>{" "}
+              ({(lastSignals[selected.symbol].confidence * 100).toFixed(0)}%)
+            </div>
+          )}
+          {lastError && (
+            <div style={{ fontSize: 11, color: CONFIG.theme.sell, marginTop: 4 }}>
+              ⚠️ تعذر الاتصال بـ signal API: {lastError}
+            </div>
+          )}
+        </div>
 
         <div style={cardStyle}>
           <div style={{ fontWeight: 700, marginBottom: 10 }}>رأس المال والمخاطرة</div>
