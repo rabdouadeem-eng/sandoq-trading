@@ -1,10 +1,13 @@
 // =============================================================
 // useBotSignal.js — يربط Sandoq بـ PRO-TRADING-BOT signal API
-// يسولف كل POLL_INTERVAL_MS، وإذا الثقة كافية، كينفذ صفقة وهمية تلقائيا
+// يسولف كل POLL_INTERVAL_MS بالضبط (ثابت)، وإذا الثقة كافية، كينفذ صفقة وهمية تلقائيا
+//
+// 🔧 v2: تصليح race condition — الفحص كان كيتفعل عشرات المرات فالثانية
+// بسبب تحديثات الأسعار الحية (WebSocket) اللي كانت كتعاود تشغل الـ effect.
+// دابا نستعملو refs باش الفحص يبقى ثابت كل 30 ثانية بالضبط.
 // =============================================================
 import { useEffect, useRef, useState, useCallback } from "react";
 
-// 🔧 بدّل هذا بـ URL الحقيقي تاع PRO-TRADING-BOT على Render
 const SIGNAL_API_URL =
   process.env.REACT_APP_SIGNAL_API_URL ||
   "https://pro-trading-bot-pevb.onrender.com/api/signals";
@@ -14,7 +17,7 @@ const BOT_ENABLED_KEY = "sandoq_bot_autotrade_enabled";
 
 export function loadBotEnabled() {
   const v = localStorage.getItem(BOT_ENABLED_KEY);
-  return v === null ? false : v === "true"; // معطل بالافتراض — المستخدم يفعّلو بنفسه
+  return v === null ? false : v === "true"; // معطل بالافتراض
 }
 
 export function saveBotEnabled(enabled) {
@@ -23,19 +26,31 @@ export function saveBotEnabled(enabled) {
 
 /**
  * @param {Object} params
- * @param {Object} params.coinsBySymbol - { BTCUSDT: {...COINS entry} }
- * @param {Object} params.prices - أسعار حية { BTCUSDT: 63000, ... }
- * @param {Array}  params.trades - الصفقات الحالية
- * @param {Function} params.placeAuto - async (coin, side, reasons) => void  (نفس منطق place() الموجود)
- * @param {boolean} params.enabled - واش التنفيذ التلقائي مفعّل
+ * @param {Object} params.coinsBySymbol
+ * @param {Object} params.prices
+ * @param {Array}  params.trades
+ * @param {Function} params.placeAuto
+ * @param {boolean} params.enabled
  */
 export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled }) {
   const [lastSignals, setLastSignals] = useState({});
   const [lastError, setLastError] = useState(null);
-  const executedRef = useRef(new Set()); // باش ما نكرروش نفس الإشارة مرتين متتاليتين
+  const executedRef = useRef(new Set());
+  const inFlightRef = useRef(false); // 🔒 يمنع تنفيذ poll() جديد إلا إذا سبقو كمل
+
+  // نخزنو آخر نسخة من القيم المتغيرة فـ refs، باش poll() ما يعاودش يتخلق
+  // كل مرة تتبدل prices/trades — هوما اللي كانوا كيسببو الـ race condition
+  const latestRef = useRef({ coinsBySymbol, prices, trades, placeAuto, enabled });
+  useEffect(() => {
+    latestRef.current = { coinsBySymbol, prices, trades, placeAuto, enabled };
+  }, [coinsBySymbol, prices, trades, placeAuto, enabled]);
 
   const poll = useCallback(async () => {
+    if (inFlightRef.current) return; // فحص سابق مازال خدام — تجاهل هاد الدورة
+    inFlightRef.current = true;
     try {
+      const { coinsBySymbol, prices, trades, placeAuto, enabled } = latestRef.current;
+
       const res = await fetch(SIGNAL_API_URL);
       if (!res.ok) throw new Error(`API error ${res.status}`);
       const data = await res.json();
@@ -45,7 +60,7 @@ export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled
       setLastSignals(bySymbol);
       setLastError(null);
 
-      if (!enabled) return; // المستخدم عطّل التنفيذ التلقائي — نعرضو الإشارات فقط
+      if (!enabled) return;
 
       for (const sig of data.signals || []) {
         if (sig.signal === "hold") continue;
@@ -54,11 +69,9 @@ export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled
         const coin = coinsBySymbol[sig.symbol];
         if (!coin) continue;
 
-        // منع تكرار نفس الإشارة إلا إذا تبدلات (buy->sell ولا العكس)
         const signalKey = `${sig.symbol}:${sig.signal}`;
         if (executedRef.current.has(signalKey)) continue;
 
-        // منع فتح صفقة جديدة إذا كاين وحدة مفتوحة بنفس العملة
         const hasOpen = trades.some((t) => t.symbol === sig.symbol && t.status === "OPEN");
         if (hasOpen) continue;
 
@@ -66,19 +79,20 @@ export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled
         await placeAuto(coin, side, sig.reasons, sig.confidence);
 
         executedRef.current.add(signalKey);
-        // نمسحو المفتاح المعاكس باش تقدر تنفذ إشارة جديدة إذا تبدل الاتجاه
         executedRef.current.delete(`${sig.symbol}:${side === "BUY" ? "sell" : "buy"}`);
       }
     } catch (e) {
       setLastError(e.message || String(e));
+    } finally {
+      inFlightRef.current = false;
     }
-  }, [coinsBySymbol, trades, placeAuto, enabled]);
+  }, []); // 🔑 بلا dependencies — poll() ثابت، ما يتخلقش من جديد أبدا
 
   useEffect(() => {
-    poll();
+    poll(); // فحص أول مرة عند التحميل
     const id = setInterval(poll, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [poll]);
+  }, [poll]); // poll ثابت دابا، فهاد effect يخدم مرة وحدة فقط
 
   return { lastSignals, lastError };
 }
