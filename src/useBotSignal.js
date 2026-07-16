@@ -1,10 +1,7 @@
 // =============================================================
 // useBotSignal.js — يربط Sandoq بـ PRO-TRADING-BOT signal API
-// يسولف كل POLL_INTERVAL_MS بالضبط (ثابت)، وإذا الثقة كافية، كينفذ صفقة وهمية تلقائيا
-//
-// 🔧 v2: تصليح race condition — الفحص كان كيتفعل عشرات المرات فالثانية
-// بسبب تحديثات الأسعار الحية (WebSocket) اللي كانت كتعاود تشغل الـ effect.
-// دابا نستعملو refs باش الفحص يبقى ثابت كل 30 ثانية بالضبط.
+// v3: أضفنا حماية cooldown محفوظة فـ localStorage — كتبقى حية حتى
+// لو الصفحة تعاود تفتح (remount) قبل ما trades يتحملو من التخزين.
 // =============================================================
 import { useEffect, useRef, useState, useCallback } from "react";
 
@@ -14,14 +11,37 @@ const SIGNAL_API_URL =
 
 const POLL_INTERVAL_MS = 30_000; // 30 ثانية
 const BOT_ENABLED_KEY = "sandoq_bot_autotrade_enabled";
+const COOLDOWN_KEY = "sandoq_bot_last_trade_ts"; // { SYMBOL: timestamp }
+const COOLDOWN_MS = 5 * 60 * 1000; // 5 دقايق — بلا صفقة جديدة لنفس العملة
 
 export function loadBotEnabled() {
   const v = localStorage.getItem(BOT_ENABLED_KEY);
-  return v === null ? false : v === "true"; // معطل بالافتراض
+  return v === null ? false : v === "true";
 }
 
 export function saveBotEnabled(enabled) {
   localStorage.setItem(BOT_ENABLED_KEY, String(enabled));
+}
+
+function loadCooldowns() {
+  try {
+    return JSON.parse(localStorage.getItem(COOLDOWN_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function markTraded(symbol) {
+  const map = loadCooldowns();
+  map[symbol] = Date.now();
+  localStorage.setItem(COOLDOWN_KEY, JSON.stringify(map));
+}
+
+function isInCooldown(symbol) {
+  const map = loadCooldowns();
+  const last = map[symbol];
+  if (!last) return false;
+  return Date.now() - last < COOLDOWN_MS;
 }
 
 /**
@@ -31,25 +51,24 @@ export function saveBotEnabled(enabled) {
  * @param {Array}  params.trades
  * @param {Function} params.placeAuto
  * @param {boolean} params.enabled
+ * @param {boolean} params.ready — true فقط بعد ما trades القديمة تتحمل من التخزين
  */
-export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled }) {
+export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled, ready }) {
   const [lastSignals, setLastSignals] = useState({});
   const [lastError, setLastError] = useState(null);
   const executedRef = useRef(new Set());
-  const inFlightRef = useRef(false); // 🔒 يمنع تنفيذ poll() جديد إلا إذا سبقو كمل
+  const inFlightRef = useRef(false);
 
-  // نخزنو آخر نسخة من القيم المتغيرة فـ refs، باش poll() ما يعاودش يتخلق
-  // كل مرة تتبدل prices/trades — هوما اللي كانوا كيسببو الـ race condition
-  const latestRef = useRef({ coinsBySymbol, prices, trades, placeAuto, enabled });
+  const latestRef = useRef({ coinsBySymbol, prices, trades, placeAuto, enabled, ready });
   useEffect(() => {
-    latestRef.current = { coinsBySymbol, prices, trades, placeAuto, enabled };
-  }, [coinsBySymbol, prices, trades, placeAuto, enabled]);
+    latestRef.current = { coinsBySymbol, prices, trades, placeAuto, enabled, ready };
+  }, [coinsBySymbol, prices, trades, placeAuto, enabled, ready]);
 
   const poll = useCallback(async () => {
-    if (inFlightRef.current) return; // فحص سابق مازال خدام — تجاهل هاد الدورة
+    if (inFlightRef.current) return;
     inFlightRef.current = true;
     try {
-      const { coinsBySymbol, prices, trades, placeAuto, enabled } = latestRef.current;
+      const { coinsBySymbol, trades, placeAuto, enabled, ready } = latestRef.current;
 
       const res = await fetch(SIGNAL_API_URL);
       if (!res.ok) throw new Error(`API error ${res.status}`);
@@ -60,7 +79,8 @@ export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled
       setLastSignals(bySymbol);
       setLastError(null);
 
-      if (!enabled) return;
+      // 🔒 ما ننفذوش صفقات إلا إذا البوت مفعّل وتحملات الصفقات القديمة
+      if (!enabled || !ready) return;
 
       for (const sig of data.signals || []) {
         if (sig.signal === "hold") continue;
@@ -72,12 +92,17 @@ export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled
         const signalKey = `${sig.symbol}:${sig.signal}`;
         if (executedRef.current.has(signalKey)) continue;
 
+        // 🔒 حماية فالذاكرة (نفس الجلسة)
         const hasOpen = trades.some((t) => t.symbol === sig.symbol && t.status === "OPEN");
         if (hasOpen) continue;
+
+        // 🔒 حماية محفوظة فـ localStorage (كتبقى حتى بعد remount/refresh)
+        if (isInCooldown(sig.symbol)) continue;
 
         const side = sig.signal === "buy" ? "BUY" : "SELL";
         await placeAuto(coin, side, sig.reasons, sig.confidence);
 
+        markTraded(sig.symbol);
         executedRef.current.add(signalKey);
         executedRef.current.delete(`${sig.symbol}:${side === "BUY" ? "sell" : "buy"}`);
       }
@@ -86,13 +111,13 @@ export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled
     } finally {
       inFlightRef.current = false;
     }
-  }, []); // 🔑 بلا dependencies — poll() ثابت، ما يتخلقش من جديد أبدا
+  }, []);
 
   useEffect(() => {
-    poll(); // فحص أول مرة عند التحميل
+    poll();
     const id = setInterval(poll, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [poll]); // poll ثابت دابا، فهاد effect يخدم مرة وحدة فقط
+  }, [poll]);
 
   return { lastSignals, lastError };
-}
+    }
