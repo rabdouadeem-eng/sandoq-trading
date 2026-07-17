@@ -1,7 +1,8 @@
 // =============================================================
 // useBotSignal.js — يربط Sandoq بـ PRO-TRADING-BOT signal API
-// v3: أضفنا حماية cooldown محفوظة فـ localStorage — كتبقى حية حتى
-// لو الصفحة تعاود تفتح (remount) قبل ما trades يتحملو من التخزين.
+// v4: الحماية كاملة هنا وحدها (بلا ما نحتاجو تعديل App.js).
+// cooldown محفوظ فـ localStorage (5 دقايق لكل عملة) — كيبقى حي
+// حتى لو الصفحة تعاود تفتح (remount) قبل ما trades يتحملو.
 // =============================================================
 import { useEffect, useRef, useState, useCallback } from "react";
 
@@ -51,24 +52,23 @@ function isInCooldown(symbol) {
  * @param {Array}  params.trades
  * @param {Function} params.placeAuto
  * @param {boolean} params.enabled
- * @param {boolean} params.ready — true فقط بعد ما trades القديمة تتحمل من التخزين
  */
-export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled, ready }) {
+export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled }) {
   const [lastSignals, setLastSignals] = useState({});
   const [lastError, setLastError] = useState(null);
   const executedRef = useRef(new Set());
   const inFlightRef = useRef(false);
 
-  const latestRef = useRef({ coinsBySymbol, prices, trades, placeAuto, enabled, ready });
+  const latestRef = useRef({ coinsBySymbol, prices, trades, placeAuto, enabled });
   useEffect(() => {
-    latestRef.current = { coinsBySymbol, prices, trades, placeAuto, enabled, ready };
-  }, [coinsBySymbol, prices, trades, placeAuto, enabled, ready]);
+    latestRef.current = { coinsBySymbol, prices, trades, placeAuto, enabled };
+  }, [coinsBySymbol, prices, trades, placeAuto, enabled]);
 
   const poll = useCallback(async () => {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     try {
-      const { coinsBySymbol, trades, placeAuto, enabled, ready } = latestRef.current;
+      const { coinsBySymbol, trades, placeAuto, enabled } = latestRef.current;
 
       const res = await fetch(SIGNAL_API_URL);
       if (!res.ok) throw new Error(`API error ${res.status}`);
@@ -79,8 +79,8 @@ export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled
       setLastSignals(bySymbol);
       setLastError(null);
 
-      // 🔒 ما ننفذوش صفقات إلا إذا البوت مفعّل وتحملات الصفقات القديمة
-      if (!enabled || !ready) return;
+      // 🔒 ما ننفذوش صفقات إلا إذا البوت مفعّل
+      if (!enabled) return;
 
       for (const sig of data.signals || []) {
         if (sig.signal === "hold") continue;
@@ -120,4 +120,4 @@ export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled
   }, [poll]);
 
   return { lastSignals, lastError };
-    }
+}
