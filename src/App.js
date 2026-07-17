@@ -453,6 +453,17 @@ function PriceRow({ coin, price, prevPrice, onSelect, selected }) {
 
 function TradeItem({ trade, currentPrice, onClose }) {
   const isOpen = trade.status === "OPEN";
+
+  // 📏 المسافة (بالنقاط) والنسبة المئوية بين الدخول والوقف/الهدف
+  const slDist = trade.stop != null ? Math.abs(trade.entry - trade.stop) : null;
+  const tpDist = trade.tp != null ? Math.abs(trade.entry - trade.tp) : null;
+  const slPct = slDist != null && trade.entry ? (slDist / trade.entry) * 100 : null;
+  const tpPct = tpDist != null && trade.entry ? (tpDist / trade.entry) * 100 : null;
+
+  // 💰 كمية الربح/الخسارة المحتملة (إذا وصل السعر للهدف/الوقف)
+  const potentialProfit = tpDist != null ? tpDist * trade.qty : null;
+  const potentialLoss = slDist != null ? slDist * trade.qty : null;
+
   return (
     <div
       style={{
@@ -494,11 +505,42 @@ function TradeItem({ trade, currentPrice, onClose }) {
           {isOpen ? "مفتوحة" : trade.pnl >= 0 ? `+${trade.pnl.toFixed(2)}` : trade.pnl.toFixed(2)}
         </span>
       </div>
-      <div style={{ fontSize: 12, color: CONFIG.theme.textMuted, marginTop: 4 }}>
-        دخول: {formatPrice(trade.entry)} · وقف: {formatPrice(trade.stop)} · كمية: {trade.qty}
+
+      {/* 🎯 EP / SL / TP — بيانات واضحة */}
+      <div style={{ fontSize: 12, color: CONFIG.theme.textMuted, marginTop: 6, lineHeight: 1.7 }}>
+        <div>
+          <span style={{ color: CONFIG.theme.text, fontWeight: 700 }}>EP</span>{" "}
+          {formatPrice(trade.entry)}
+        </div>
+        {trade.stop != null && (
+          <div>
+            <span style={{ color: CONFIG.theme.sell, fontWeight: 700 }}>SL</span>{" "}
+            {formatPrice(trade.stop)}
+            {slPct != null && ` (−${slPct.toFixed(2)}%)`}
+          </div>
+        )}
+        {trade.tp != null && (
+          <div>
+            <span style={{ color: CONFIG.theme.buy, fontWeight: 700 }}>TP</span>{" "}
+            {formatPrice(trade.tp)}
+            {tpPct != null && ` (+${tpPct.toFixed(2)}%)`}
+          </div>
+        )}
+        <div>الكمية: {trade.qty}</div>
+        {isOpen && potentialProfit != null && (
+          <div style={{ color: CONFIG.theme.buy }}>
+            ربح محتمل عند TP: +${potentialProfit.toFixed(2)}
+          </div>
+        )}
+        {isOpen && potentialLoss != null && (
+          <div style={{ color: CONFIG.theme.sell }}>
+            خسارة محتملة عند SL: −${potentialLoss.toFixed(2)}
+          </div>
+        )}
       </div>
+
       {!isOpen && (
-        <div style={{ fontSize: 12, color: CONFIG.theme.textMuted }}>
+        <div style={{ fontSize: 12, color: CONFIG.theme.textMuted, marginTop: 4 }}>
           خروج: {formatPrice(trade.exit)} · {new Date(trade.closedAt).toLocaleString()}
         </div>
       )}
@@ -507,6 +549,7 @@ function TradeItem({ trade, currentPrice, onClose }) {
           onClick={() => onClose(trade.id, currentPrice ?? trade.entry)}
           style={ghostBtnStyle}
         >
+          
           إغلاق بسعر السوق
         </button>
       )}
