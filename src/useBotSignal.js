@@ -105,6 +105,10 @@ export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled
         markTraded(sig.symbol);
         executedRef.current.add(signalKey);
         executedRef.current.delete(`${sig.symbol}:${side === "BUY" ? "sell" : "buy"}`);
+
+        // 🔒 صفقة وحدة بَرك كل دورة — كيخلي فحص maxOpenTrades يبقى دقيق
+        // (بلا هاذي، البوت يقدر يفتح بزاف صفقات دفعة وحدة قبل ما العدد يتحدث)
+        break;
       }
     } catch (e) {
       setLastError(e.message || String(e));
@@ -120,4 +124,4 @@ export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled
   }, [poll]);
 
   return { lastSignals, lastError };
-}
+                              }
