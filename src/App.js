@@ -274,6 +274,13 @@ function calcPositionSize({ capital, riskPct, entryPrice, stopPrice }) {
   return +(amountRisked / perUnitRisk).toFixed(6);
 }
 
+function calcTakeProfit(entry, stop, side) {
+  if (!entry || !stop) return null;
+  const dist = Math.abs(entry - stop);
+  return side === "BUY"
+    ? +(entry + dist * 2).toFixed(8)
+    : +(entry - dist * 2).toFixed(8);
+}
 function newIdempotencyKey() {
   return `idem-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
