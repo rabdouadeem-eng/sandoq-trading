@@ -305,6 +305,7 @@ function CandleChart({ candles }) {
   const width = 448;
   const height = 160;
   const padding = 8;
+  const rightAxisWidth = 62; // مساحة أرقام الأسعار
 
   if (!candles || candles.length < 2) {
     return (
@@ -329,40 +330,85 @@ function CandleChart({ candles }) {
   const max = Math.max(...highs);
   const range = max - min || 1;
 
-  const chartWidth = width - padding * 2;
+  const chartWidth = width - padding * 2 - rightAxisWidth;
   const chartHeight = height - padding * 2;
   const candleSlot = chartWidth / candles.length;
   const candleWidth = Math.max(2, candleSlot * 0.6);
 
   const yFor = (price) => padding + (1 - (price - min) / range) * chartHeight;
 
+  // 4 مستويات سعر موزعة بالتساوي على المحور العمودي
+  const priceLevels = [0, 1 / 3, 2 / 3, 1].map((t) => min + range * t);
+
+  const firstTime = new Date(candles[0].time);
+  const lastTime = new Date(candles[candles.length - 1].time);
+  const fmtTime = (d) =>
+    `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+
   return (
-    <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
-      {candles.map((c, i) => {
-        const x = padding + i * candleSlot + candleSlot / 2;
-        const isUp = c.close >= c.open;
-        const color = isUp ? CONFIG.theme.buy : CONFIG.theme.sell;
-        const bodyTop = yFor(Math.max(c.open, c.close));
-        const bodyBottom = yFor(Math.min(c.open, c.close));
-        const bodyHeight = Math.max(1, bodyBottom - bodyTop);
-
-        return (
-          <g key={c.time}>
-            <line x1={x} x2={x} y1={yFor(c.high)} y2={yFor(c.low)} stroke={color} strokeWidth="1" />
-            <rect
-              x={x - candleWidth / 2}
-              y={bodyTop}
-              width={candleWidth}
-              height={bodyHeight}
-              fill={color}
+    <div>
+      <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
+        {/* خطوط شبكة أفقية + أرقام الأسعار */}
+        {priceLevels.map((p, i) => (
+          <g key={i}>
+            <line
+              x1={padding}
+              x2={padding + chartWidth}
+              y1={yFor(p)}
+              y2={yFor(p)}
+              stroke={CONFIG.theme.border}
+              strokeWidth="1"
+              strokeDasharray="2,3"
             />
+            <text
+              x={padding + chartWidth + 6}
+              y={yFor(p) + 3}
+              fontSize="9"
+              fill={CONFIG.theme.textMuted}
+            >
+              {formatPrice(p)}
+            </text>
           </g>
-        );
-      })}
-    </svg>
-  );
-}
+        ))}
 
+        {candles.map((c, i) => {
+          const x = padding + i * candleSlot + candleSlot / 2;
+          const isUp = c.close >= c.open;
+          const color = isUp ? CONFIG.theme.buy : CONFIG.theme.sell;
+          const bodyTop = yFor(Math.max(c.open, c.close));
+          const bodyBottom = yFor(Math.min(c.open, c.close));
+          const bodyHeight = Math.max(1, bodyBottom - bodyTop);
+
+          return (
+            <g key={c.time}>
+              <line x1={x} x2={x} y1={yFor(c.high)} y2={yFor(c.low)} stroke={color} strokeWidth="1" />
+              <rect
+                x={x - candleWidth / 2}
+                y={bodyTop}
+                width={candleWidth}
+                height={bodyHeight}
+                fill={color}
+              />
+            </g>
+          );
+        })}
+      </svg>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          fontSize: 10,
+          color: CONFIG.theme.textMuted,
+          marginTop: 2,
+          paddingRight: rightAxisWidth,
+        }}
+      >
+        <span>{fmtTime(firstTime)}</span>
+        <span>{fmtTime(lastTime)}</span>
+      </div>
+    </div>
+  );
+    }
 function PriceRow({ coin, price, prevPrice, onSelect, selected }) {
   const dir = price != null && prevPrice != null ? (price >= prevPrice ? 1 : -1) : 0;
   const color = dir === 1 ? CONFIG.theme.buy : dir === -1 ? CONFIG.theme.sell : CONFIG.theme.text;
