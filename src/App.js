@@ -684,7 +684,7 @@ export default function App() {
         symbol: order.symbol,
         side: order.side,
         entry: order.avgPrice,
-        stop: coinStop,
+        stop: coinStop,tp: calcTakeProfit(order.avgPrice, coinStop, side),
         qty: order.qty,
         status: "OPEN",
         openedAt: order.ts,
