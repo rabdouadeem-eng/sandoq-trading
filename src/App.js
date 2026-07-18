@@ -807,7 +807,42 @@ export default function App() {
     setTrades(next);
     await saveTrades(next);
   }
+  // 🤖 إغلاق تلقائي عند وصول السعر لـ TP أو SL + إشعار
+  useEffect(() => {
+    const toClose = trades.filter((t) => {
+      if (t.status !== "OPEN") return false;
+      const price = prices[t.symbol];
+      if (!price) return false;
+      const hitTP = t.tp != null && (t.side === "BUY" ? price >= t.tp : price <= t.tp);
+      const hitSL = t.stop != null && (t.side === "BUY" ? price <= t.stop : price >= t.stop);
+      return hitTP || hitSL;
+    });
+    if (toClose.length === 0) return;
 
+    const next = trades.map((t) => {
+      const hit = toClose.find((c) => c.id === t.id);
+      if (!hit) return t;
+      const price = prices[t.symbol];
+      const isTP = t.tp != null && (t.side === "BUY" ? price >= t.tp : price <= t.tp);
+      const exitPrice = isTP ? t.tp : t.stop;
+      const pnl = (exitPrice - t.entry) * t.qty * (t.side === "BUY" ? 1 : -1);
+      return { ...t, status: "CLOSED", exit: exitPrice, closedAt: Date.now(), pnl };
+    });
+
+    setTrades(next);
+    saveTrades(next);
+
+    toClose.forEach((t) => {
+      const price = prices[t.symbol];
+      const isTP = t.tp != null && (t.side === "BUY" ? price >= t.tp : price <= t.tp);
+      const exitPrice = isTP ? t.tp : t.stop;
+      const pnl = (exitPrice - t.entry) * t.qty * (t.side === "BUY" ? 1 : -1);
+      showMessage(
+        isTP ? "🎯 تحقق هدف الربح!" : "🛑 وقف الخسارة",
+        `${t.symbol} أُغلقت تلقائياً بسعر ${formatPrice(exitPrice)} (${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)})`
+      );
+    });
+  }, [prices]);
   async function resetTrades() {
     setTrades([]);
     await saveTrades([]);
