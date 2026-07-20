@@ -136,13 +136,27 @@ const FALLBACK_SEED = {
   DOGEUSDT: 0.14, SHIBUSDT: 0.000023, PEPEUSDT: 0.0000085,
 };
 
-async function fetchPriceREST(symbol) {
+async function fetchPriceREST(symbol, knownPrice) {
   try {
     const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
     if (!res.ok) throw new Error("REST fetch failed");
     const data = await res.json();
-    return parseFloat(data.price);
+    const price = parseFloat(data.price);
+    if (!price || isNaN(price)) throw new Error("Invalid REST price");
+
+    // 🔒 فحص أمان: إيلا سعر REST بعيد بزاف (+5%) على آخر سعر حي معروف
+    // من الـ WebSocket، نرفضوه ونستعملو السعر الحي (أوثق منه).
+    if (knownPrice && Math.abs(price - knownPrice) / knownPrice > 0.05) {
+      console.warn(
+        `Sandoq: REST price for ${symbol} (${price}) is suspiciously far from live price (${knownPrice}); using live price instead.`
+      );
+      return knownPrice;
+    }
+    return price;
   } catch (e) {
+    // 🔒 لا نرجع لأرقام قديمة مثبتة يدوياً فالكود (FALLBACK_SEED) —
+    // نستعمل آخر سعر حي معروف إيلا كاين، وهو أدق بكثير من رقم ثابت.
+    if (knownPrice) return knownPrice;
     return FALLBACK_SEED[symbol] ?? 1;
   }
 }
@@ -166,7 +180,7 @@ async function fetchInitialKlines(symbol, limit = MAX_CANDLES) {
   }
 }
 
-async function placeOrder({ symbol, side, qty, idempotencyKey }) {
+async function placeOrder({ symbol, side, qty, idempotencyKey, knownPrice }) {
   const cachedRaw = localStorage.getItem(`idem:${idempotencyKey}`);
   if (cachedRaw) return JSON.parse(cachedRaw);
 
@@ -178,7 +192,7 @@ async function placeOrder({ symbol, side, qty, idempotencyKey }) {
     type: "MARKET",
     qty,
     status: "FILLED",
-    avgPrice: await fetchPriceREST(symbol),
+    avgPrice: await fetchPriceREST(symbol, knownPrice),
     ts: Date.now(),
     idempotencyKey,
   };
@@ -720,6 +734,7 @@ export default function App() {
         side,
         qty,
         idempotencyKey: idem,
+        knownPrice: coinPrice,
       });
 
       const trade = {
@@ -780,7 +795,7 @@ export default function App() {
     if (suggestedQty <= 0) return showMessage("حجم غير صالح", "تحقق من رأس المال ونسبة المخاطرة.");
 
     const idem = newIdempotencyKey();
-    const order = await placeOrder({ symbol: selected.symbol, side, qty: suggestedQty, idempotencyKey: idem });
+    const order = await placeOrder({ symbol: selected.symbol, side, qty: suggestedQty, idempotencyKey: idem, knownPrice: entry });
 
     const trade = {
       id: order.orderId,
