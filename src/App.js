@@ -136,13 +136,27 @@ const FALLBACK_SEED = {
   DOGEUSDT: 0.14, SHIBUSDT: 0.000023, PEPEUSDT: 0.0000085,
 };
 
-async function fetchPriceREST(symbol) {
+async function fetchPriceREST(symbol, knownPrice) {
   try {
     const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
     if (!res.ok) throw new Error("REST fetch failed");
     const data = await res.json();
-    return parseFloat(data.price);
+    const price = parseFloat(data.price);
+    if (!price || isNaN(price)) throw new Error("Invalid REST price");
+
+    // 🔒 فحص أمان: إيلا سعر REST بعيد بزاف (+5%) على آخر سعر حي معروف
+    // من الـ WebSocket، نرفضوه ونستعملو السعر الحي (أوثق منه).
+    if (knownPrice && Math.abs(price - knownPrice) / knownPrice > 0.05) {
+      console.warn(
+        `Sandoq: REST price for ${symbol} (${price}) is suspiciously far from live price (${knownPrice}); using live price instead.`
+      );
+      return knownPrice;
+    }
+    return price;
   } catch (e) {
+    // 🔒 لا نرجع لأرقام قديمة مثبتة يدوياً فالكود (FALLBACK_SEED) —
+    // نستعمل آخر سعر حي معروف إيلا كاين، وهو أدق بكثير من رقم ثابت.
+    if (knownPrice) return knownPrice;
     return FALLBACK_SEED[symbol] ?? 1;
   }
 }
@@ -166,7 +180,7 @@ async function fetchInitialKlines(symbol, limit = MAX_CANDLES) {
   }
 }
 
-async function placeOrder({ symbol, side, qty, idempotencyKey }) {
+async function placeOrder({ symbol, side, qty, idempotencyKey, knownPrice }) {
   const cachedRaw = localStorage.getItem(`idem:${idempotencyKey}`);
   if (cachedRaw) return JSON.parse(cachedRaw);
 
@@ -178,7 +192,7 @@ async function placeOrder({ symbol, side, qty, idempotencyKey }) {
     type: "MARKET",
     qty,
     status: "FILLED",
-    avgPrice: await fetchPriceREST(symbol),
+    avgPrice: await fetchPriceREST(symbol, knownPrice),
     ts: Date.now(),
     idempotencyKey,
   };
@@ -295,6 +309,19 @@ function dailyRealizedPnL(trades) {
 
 function openTradesCount(trades) {
   return trades.filter((t) => t.status === "OPEN").length;
+}
+
+function dailyWinRate(trades) {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const closedToday = trades.filter(
+    (t) => t.status === "CLOSED" && t.closedAt >= start.getTime()
+  );
+  const wins = closedToday.filter((t) => (t.pnl || 0) > 0).length;
+  const losses = closedToday.filter((t) => (t.pnl || 0) <= 0).length;
+  const total = closedToday.length;
+  const pct = total > 0 ? (wins / total) * 100 : null;
+  return { wins, losses, total, pct };
 }
 
 function formatPrice(p) {
@@ -615,6 +642,7 @@ export default function App() {
       const [t, c, k] = await Promise.all([loadTrades(), loadUserConfig(), loadApiKey()]);
       setTrades(t);
       setUserCfg(c);
+      if (c && c.stopPct != null) setStopPct(String(c.stopPct));
       setApiKey(k || "");
     })();
   }, []);
@@ -678,6 +706,7 @@ export default function App() {
   }, [entry, stop, userCfg]);
 
   const realized = useMemo(() => dailyRealizedPnL(trades), [trades]);
+  const winRate = useMemo(() => dailyWinRate(trades), [trades]);
   const cap = parseFloat(userCfg.capital) || 0;
   const dailyLimit = cap * (CONFIG.risk.dailyLossLimitPct / 100);
   const tradingHalted = realized <= -dailyLimit;
@@ -720,6 +749,7 @@ export default function App() {
         side,
         qty,
         idempotencyKey: idem,
+        knownPrice: coinPrice,
       });
 
       const trade = {
@@ -780,7 +810,7 @@ export default function App() {
     if (suggestedQty <= 0) return showMessage("حجم غير صالح", "تحقق من رأس المال ونسبة المخاطرة.");
 
     const idem = newIdempotencyKey();
-    const order = await placeOrder({ symbol: selected.symbol, side, qty: suggestedQty, idempotencyKey: idem });
+    const order = await placeOrder({ symbol: selected.symbol, side, qty: suggestedQty, idempotencyKey: idem, knownPrice: entry });
 
     const trade = {
       id: order.orderId,
@@ -855,7 +885,7 @@ export default function App() {
   }
 
   async function saveSettings() {
-    await saveUserConfig(userCfg);
+    await saveUserConfig({ ...userCfg, stopPct });
     if (apiKey) await saveApiKey(apiKey);
     showMessage("حُفظت", "تم حفظ الإعدادات والمفتاح مشفّر محلياً.");
   }
@@ -973,6 +1003,16 @@ export default function App() {
             <Stat label="خسارة اليوم" value={`$${realized.toFixed(2)}`} muted={realized < 0} />
             <Stat label="صفقات مفتوحة" value={`${openCount}/${CONFIG.risk.maxOpenTrades}`} />
           </div>
+
+          {winRate.total > 0 && (
+            <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+              <Stat
+                label="نسبة النجاح اليوم"
+                value={`${winRate.pct.toFixed(0)}% (${winRate.wins}✅ / ${winRate.losses}❌ من ${winRate.total})`}
+                muted={winRate.pct < 50}
+              />
+            </div>
+          )}
 
           {tradingHalted && (
             <div style={{ color: CONFIG.theme.sell, marginTop: 10, fontWeight: 700 }}>
