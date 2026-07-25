@@ -299,6 +299,66 @@ function newIdempotencyKey() {
   return `idem-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+// =============================================================
+// اختبار الأداء (Backtest) — يشغّل نفس منطق TP/SL على بيانات
+// تاريخية حقيقية من Binance، حتى يصل لعدد صفقات محدد.
+// =============================================================
+async function fetchHistoricalKlines(symbol, interval, limit) {
+  const res = await fetch(
+    `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
+  );
+  if (!res.ok) throw new Error("فشل جلب البيانات التاريخية");
+  const data = await res.json();
+  return data.map((k) => ({
+    time: k[0],
+    open: parseFloat(k[1]),
+    high: parseFloat(k[2]),
+    low: parseFloat(k[3]),
+    close: parseFloat(k[4]),
+  }));
+}
+
+function runBacktestSimulation(candles, stopPct, maxTrades) {
+  const trades = [];
+  let i = 0;
+
+  while (i < candles.length - 1 && trades.length < maxTrades) {
+    const entryCandle = candles[i];
+    const entry = entryCandle.close;
+    const side = "BUY"; // نفس البوت الحالي: يفتح شراء افتراضياً
+    const stop = +(entry * (1 - stopPct / 100)).toFixed(8);
+    const tp = calcTakeProfit(entry, stop, side);
+
+    let closed = false;
+    for (let j = i + 1; j < candles.length; j++) {
+      const c = candles[j];
+      const hitTP = c.high >= tp;
+      const hitSL = c.low <= stop;
+
+      if (hitTP || hitSL) {
+        // إيلا الشمعة ضربت الاثنين، نفترض السوء (SL) أولاً — تقدير متحفظ
+        const isTP = hitTP && !hitSL;
+        const exit = isTP ? tp : stop;
+        const pnlPct = ((exit - entry) / entry) * 100;
+        trades.push({ entry, exit, isTP, pnlPct, time: c.time });
+        i = j + 1;
+        closed = true;
+        break;
+      }
+    }
+    if (!closed) break; // بيانات ماكفاتش باش تسد آخر صفقة
+  }
+
+  const wins = trades.filter((t) => t.isTP).length;
+  const losses = trades.filter((t) => !t.isTP).length;
+  const total = trades.length;
+  const avgPnlPct =
+    total > 0 ? trades.reduce((s, t) => s + t.pnlPct, 0) / total : 0;
+  const winRatePct = total > 0 ? (wins / total) * 100 : 0;
+
+  return { trades, wins, losses, total, avgPnlPct, winRatePct };
+}
+
 function dailyRealizedPnL(trades) {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
@@ -633,6 +693,9 @@ export default function App() {
   const [userCfg, setUserCfg] = useState({ capital: 1000, riskPct: 1.0 });
   const [selected, setSelected] = useState(COINS[0]);
   const [stopPct, setStopPct] = useState("1.5");
+  const [backtestResult, setBacktestResult] = useState(null);
+  const [backtestRunning, setBacktestRunning] = useState(false);
+  const [backtestError, setBacktestError] = useState(null);
   const [apiKey, setApiKey] = useState("");
   const [message, setMessage] = useState(null);
   const [botEnabled, setBotEnabledState] = useState(loadBotEnabled());
@@ -890,6 +953,23 @@ export default function App() {
     showMessage("حُفظت", "تم حفظ الإعدادات والمفتاح مشفّر محلياً.");
   }
 
+  async function handleRunBacktest() {
+    setBacktestRunning(true);
+    setBacktestError(null);
+    setBacktestResult(null);
+    try {
+      // شموع 15 دقيقة × 1000 ≈ آخر ~10 أيام، كافية لـ 50 صفقة عادة
+      const candles = await fetchHistoricalKlines(selected.symbol, "15m", 1000);
+      const s = parseFloat(stopPct) || 1.5;
+      const result = runBacktestSimulation(candles, s, 50);
+      setBacktestResult(result);
+    } catch (e) {
+      setBacktestError(e.message || "فشل الاختبار");
+    } finally {
+      setBacktestRunning(false);
+    }
+  }
+
   const selectedCandles = candleHistory[selected.symbol] || [];
 
   return (
@@ -1023,6 +1103,68 @@ export default function App() {
           <button style={ghostBtnStyle} onClick={saveSettings}>
             حفظ الإعدادات
           </button>
+        </div>
+
+        <div style={cardStyle}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>
+            🧪 اختبار الأداء (Backtest) — 50 صفقة
+          </div>
+          <div style={{ fontSize: 12, color: CONFIG.theme.textMuted, marginBottom: 12 }}>
+            يشغّل نفس إعدادات وقف الخسارة الحالية ({stopPct}%) على بيانات
+            {" "}{selected.name} التاريخية الحقيقية من Binance، حتى يصل لـ 50 صفقة، ويحسب نسبة النجاح.
+          </div>
+          <button
+            style={btnStyle}
+            onClick={handleRunBacktest}
+            disabled={backtestRunning}
+          >
+            {backtestRunning ? "جاري التشغيل..." : "شغّل اختبار 50 صفقة"}
+          </button>
+
+          {backtestError && (
+            <div style={{ color: CONFIG.theme.sell, marginTop: 10, fontSize: 13 }}>
+              ⚠️ {backtestError}
+            </div>
+          )}
+
+          {backtestResult && (
+            <div
+              style={{
+                marginTop: 14,
+                padding: 14,
+                borderRadius: 10,
+                background: "#0B0E13",
+                border: `1px solid ${CONFIG.theme.border}`,
+              }}
+            >
+              <div style={{ marginBottom: 8 }}>
+                <span style={labelStyle}>عدد الصفقات: </span>
+                <strong>{backtestResult.total}</strong>
+              </div>
+              <div style={{ marginBottom: 8 }}>
+                <span style={labelStyle}>نسبة النجاح: </span>
+                <strong
+                  style={{
+                    color: backtestResult.winRatePct >= 50 ? CONFIG.theme.green : CONFIG.theme.red,
+                    fontSize: 20,
+                  }}
+                >
+                  {backtestResult.winRatePct.toFixed(1)}% ({backtestResult.wins}✅ / {backtestResult.losses}❌)
+                </strong>
+              </div>
+              <div>
+                <span style={labelStyle}>متوسط الربح/الخسارة لكل صفقة: </span>
+                <strong style={{ color: backtestResult.avgPnlPct >= 0 ? CONFIG.theme.green : CONFIG.theme.red }}>
+                  {backtestResult.avgPnlPct >= 0 ? "+" : ""}{backtestResult.avgPnlPct.toFixed(2)}%
+                </strong>
+              </div>
+              {backtestResult.total < 50 && (
+                <div style={{ fontSize: 11, color: CONFIG.theme.textMuted, marginTop: 8 }}>
+                  ملاحظة: البيانات المتوفرة كافت لـ {backtestResult.total} صفقة بس (بدل 50).
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div style={cardStyle}>
