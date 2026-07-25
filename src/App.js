@@ -1114,7 +1114,17 @@ export default function App() {
             {" "}{selected.name} التاريخية الحقيقية من Binance، حتى يصل لـ 50 صفقة، ويحسب نسبة النجاح.
           </div>
           <button
-            style={btnStyle}
+            style={{
+              width: "100%",
+              padding: 12,
+              borderRadius: 8,
+              border: "none",
+              background: CONFIG.theme.warn,
+              color: "#0B0E13",
+              fontWeight: 700,
+              cursor: backtestRunning ? "not-allowed" : "pointer",
+              opacity: backtestRunning ? 0.6 : 1,
+            }}
             onClick={handleRunBacktest}
             disabled={backtestRunning}
           >
