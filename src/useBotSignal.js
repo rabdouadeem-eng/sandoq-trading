@@ -52,23 +52,24 @@ function isInCooldown(symbol) {
  * @param {Array}  params.trades
  * @param {Function} params.placeAuto
  * @param {boolean} params.enabled
+ * @param {number} params.minConfidence - الحد الأدنى لثقة الإشارة (0 إلى 1) قبل ما البوت يدخل الصفقة
  */
-export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled }) {
+export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled, minConfidence }) {
   const [lastSignals, setLastSignals] = useState({});
   const [lastError, setLastError] = useState(null);
   const executedRef = useRef(new Set());
   const inFlightRef = useRef(false);
 
-  const latestRef = useRef({ coinsBySymbol, prices, trades, placeAuto, enabled });
+  const latestRef = useRef({ coinsBySymbol, prices, trades, placeAuto, enabled, minConfidence });
   useEffect(() => {
-    latestRef.current = { coinsBySymbol, prices, trades, placeAuto, enabled };
-  }, [coinsBySymbol, prices, trades, placeAuto, enabled]);
+    latestRef.current = { coinsBySymbol, prices, trades, placeAuto, enabled, minConfidence };
+  }, [coinsBySymbol, prices, trades, placeAuto, enabled, minConfidence]);
 
   const poll = useCallback(async () => {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     try {
-      const { coinsBySymbol, trades, placeAuto, enabled } = latestRef.current;
+      const { coinsBySymbol, trades, placeAuto, enabled, minConfidence } = latestRef.current;
 
       const res = await fetch(SIGNAL_API_URL);
       if (!res.ok) throw new Error(`API error ${res.status}`);
@@ -82,9 +83,12 @@ export function useBotSignal({ coinsBySymbol, prices, trades, placeAuto, enabled
       // 🔒 ما ننفذوش صفقات إلا إذا البوت مفعّل
       if (!enabled) return;
 
+      // العتبة النهائية = الأعلى بين عتبة الـ API وعتبة المستخدم (minConfidence)
+      const effectiveThreshold = Math.max(data.threshold ?? 0.65, minConfidence ?? 0.65);
+
       for (const sig of data.signals || []) {
         if (sig.signal === "hold") continue;
-        if (sig.confidence < (data.threshold ?? 0.65)) continue;
+        if (sig.confidence < effectiveThreshold) continue;
 
         const coin = coinsBySymbol[sig.symbol];
         if (!coin) continue;
