@@ -109,9 +109,23 @@ async function saveTrades(trades) {
 async function loadUserConfig() {
   try {
     const v = localStorage.getItem(K_CONFIG);
-    return v ? JSON.parse(v) : { capital: 1000, riskPct: CONFIG.risk.riskPerTradePct, walletPct: 50 };
+    return v
+      ? JSON.parse(v)
+      : {
+          capital: 1000,
+          riskPct: CONFIG.risk.riskPerTradePct,
+          walletPct: 50,
+          minConfidence: 80,
+          dailyTradeAmountLimit: 500,
+        };
   } catch (e) {
-    return { capital: 1000, riskPct: CONFIG.risk.riskPerTradePct, walletPct: 50 };
+    return {
+      capital: 1000,
+      riskPct: CONFIG.risk.riskPerTradePct,
+      walletPct: 50,
+      minConfidence: 80,
+      dailyTradeAmountLimit: 500,
+    };
   }
 }
 async function saveUserConfig(cfg) {
@@ -365,6 +379,15 @@ function dailyRealizedPnL(trades) {
   return trades
     .filter((t) => t.status === "CLOSED" && t.closedAt >= start.getTime())
     .reduce((s, t) => s + (t.pnl || 0), 0);
+}
+
+// إجمالي مبلغ التداول اليوم (كل الصفقات المفتوحة اليوم، مغلقة أو لا)
+function dailyTradedAmount(trades) {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  return trades
+    .filter((t) => t.openedAt >= start.getTime())
+    .reduce((s, t) => s + Math.abs((t.entry || 0) * (t.qty || 0)), 0);
 }
 
 function openTradesCount(trades) {
@@ -702,7 +725,13 @@ export default function App() {
   const [prevPrices, setPrevPrices] = useState({});
   const [candleHistory, setCandleHistory] = useState({});
   const [trades, setTrades] = useState([]);
-  const [userCfg, setUserCfg] = useState({ capital: 1000, riskPct: 1.0, walletPct: 50 });
+  const [userCfg, setUserCfg] = useState({
+    capital: 1000,
+    riskPct: 1.0,
+    walletPct: 50,
+    minConfidence: 80,
+    dailyTradeAmountLimit: 500,
+  });
   const [selected, setSelected] = useState(COINS[0]);
   const [stopPct, setStopPct] = useState("1.5");
   const [backtestResult, setBacktestResult] = useState(null);
@@ -801,6 +830,9 @@ export default function App() {
     []
   );
 
+  const dailyTraded = useMemo(() => dailyTradedAmount(trades), [trades]);
+  const dailyTradeLimit = parseFloat(userCfg.dailyTradeAmountLimit) || 0;
+
   const placeAuto = useCallback(
     async (coin, side, reasons, confidence) => {
       if (realized <= -dailyLimit) return;
@@ -821,6 +853,14 @@ export default function App() {
         stopPrice: coinStop,
       });
       if (qty <= 0) return;
+
+      // 🔒 حد مبلغ التداول اليومي: ما نزيدوش الصفقة إلا فاتت الحد
+      const notional = qty * coinPrice;
+      const dailyTradeLimitNow = parseFloat(userCfg.dailyTradeAmountLimit) || 0;
+      if (dailyTradeLimitNow > 0 && dailyTradedAmount(trades) + notional > dailyTradeLimitNow) {
+        showMessage("⛔ حد التداول اليومي", "تم بلوغ الحد الأقصى لمبلغ التداول اليوم.");
+        return;
+      }
 
       const idem = newIdempotencyKey();
       const order = await placeOrder({
@@ -867,6 +907,7 @@ export default function App() {
     trades,
     placeAuto,
     enabled: botEnabled,
+    minConfidence: (parseFloat(userCfg.minConfidence) || 80) / 100,
   });
 
   function toggleBot() {
@@ -988,6 +1029,16 @@ export default function App() {
 
   const selectedCandles = candleHistory[selected.symbol] || [];
 
+  const botStatus = !botEnabled
+    ? "stopped"
+    : tradingHalted || (dailyTradeLimit > 0 && dailyTraded >= dailyTradeLimit)
+    ? "warning"
+    : "running";
+  const botStatusColor =
+    botStatus === "running" ? CONFIG.theme.buy : botStatus === "warning" ? CONFIG.theme.warn : CONFIG.theme.sell;
+  const botStatusLabel =
+    botStatus === "running" ? "🟢 شغال" : botStatus === "warning" ? "🟡 تنبيه" : "🔴 متوقف";
+
   return (
     <div style={{ background: CONFIG.theme.bg, color: CONFIG.theme.text, minHeight: "100vh" }}>
       <div style={{ maxWidth: 480, margin: "0 auto", padding: 16 }}>
@@ -1022,8 +1073,8 @@ export default function App() {
           >
             <div>
               <div style={{ fontWeight: 700 }}>🤖 التداول التلقائي (Bot)</div>
-              <div style={{ fontSize: 11, color: CONFIG.theme.textMuted }}>
-                مصدر: PRO-TRADING-BOT · {botEnabled ? "مفعّل" : "متوقف"}
+              <div style={{ fontSize: 11, color: botStatusColor, fontWeight: 700 }}>
+                مصدر: PRO-TRADING-BOT · {botStatusLabel}
               </div>
             </div>
             <button
@@ -1033,13 +1084,19 @@ export default function App() {
                 width: "auto",
                 marginTop: 0,
                 padding: "8px 16px",
-                borderColor: botEnabled ? CONFIG.theme.buy : CONFIG.theme.border,
-                color: botEnabled ? CONFIG.theme.buy : CONFIG.theme.text,
+                borderColor: botStatusColor,
+                color: botStatusColor,
               }}
             >
               {botEnabled ? "إيقاف" : "تفعيل"}
             </button>
           </div>
+
+          {botStatus === "warning" && (
+            <div style={{ fontSize: 12, color: CONFIG.theme.warn, marginBottom: 10 }}>
+              ⚠️ البوت مفعّل لكن التداول متوقف مؤقتاً (حد الخسارة أو حد مبلغ التداول اليومي).
+            </div>
+          )}
 
           {botEnabled && lastSignals[selected.symbol] && (
             <div style={{ fontSize: 12, color: CONFIG.theme.textMuted }}>
@@ -1095,6 +1152,26 @@ export default function App() {
           </div>
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={labelStyle}>🎯 أدنى نسبة ثقة للدخول %</span>
+            <input
+              type="number"
+              style={inputStyle}
+              value={userCfg.minConfidence}
+              onChange={(e) => setUserCfg((c) => ({ ...c, minConfidence: e.target.value }))}
+            />
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={labelStyle}>📅 حد مبلغ التداول اليومي $</span>
+            <input
+              type="number"
+              style={inputStyle}
+              value={userCfg.dailyTradeAmountLimit}
+              onChange={(e) => setUserCfg((c) => ({ ...c, dailyTradeAmountLimit: e.target.value }))}
+            />
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <span style={labelStyle}>وقف الخسارة %</span>
             <input
               type="number"
@@ -1114,6 +1191,14 @@ export default function App() {
             <Stat label="💰 صندوق الأرباح" value={`$${walletInfo.wallet.toFixed(2)}`} />
             <Stat label="إجمالي الأرباح" value={`$${walletInfo.totalProfit.toFixed(2)}`} />
             <Stat label="إجمالي الخسائر" value={`$${walletInfo.totalLoss.toFixed(2)}`} muted />
+          </div>
+
+          <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+            <Stat
+              label="📅 تداول اليوم"
+              value={`$${dailyTraded.toFixed(2)} / $${dailyTradeLimit.toFixed(2)}`}
+              muted={dailyTradeLimit > 0 && dailyTraded >= dailyTradeLimit}
+            />
           </div>
 
           {winRate.total > 0 && (
