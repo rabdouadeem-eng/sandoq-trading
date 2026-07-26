@@ -109,9 +109,9 @@ async function saveTrades(trades) {
 async function loadUserConfig() {
   try {
     const v = localStorage.getItem(K_CONFIG);
-    return v ? JSON.parse(v) : { capital: 1000, riskPct: CONFIG.risk.riskPerTradePct };
+    return v ? JSON.parse(v) : { capital: 1000, riskPct: CONFIG.risk.riskPerTradePct, walletPct: 50 };
   } catch (e) {
-    return { capital: 1000, riskPct: CONFIG.risk.riskPerTradePct };
+    return { capital: 1000, riskPct: CONFIG.risk.riskPerTradePct, walletPct: 50 };
   }
 }
 async function saveUserConfig(cfg) {
@@ -369,6 +369,18 @@ function dailyRealizedPnL(trades) {
 
 function openTradesCount(trades) {
   return trades.filter((t) => t.status === "OPEN").length;
+}
+
+// صندوق الأرباح: نسبة من كل صفقة رابحة (مغلقة) كتتجمع هنا، منفصلة على رأس المال
+function computeWallet(trades, walletPct) {
+  const totalProfit = trades
+    .filter((t) => t.status === "CLOSED" && (t.pnl || 0) > 0)
+    .reduce((s, t) => s + t.pnl, 0);
+  const totalLoss = trades
+    .filter((t) => t.status === "CLOSED" && (t.pnl || 0) < 0)
+    .reduce((s, t) => s + t.pnl, 0);
+  const wallet = totalProfit * (walletPct / 100);
+  return { wallet, totalProfit, totalLoss };
 }
 
 function dailyWinRate(trades) {
@@ -690,7 +702,7 @@ export default function App() {
   const [prevPrices, setPrevPrices] = useState({});
   const [candleHistory, setCandleHistory] = useState({});
   const [trades, setTrades] = useState([]);
-  const [userCfg, setUserCfg] = useState({ capital: 1000, riskPct: 1.0 });
+  const [userCfg, setUserCfg] = useState({ capital: 1000, riskPct: 1.0, walletPct: 50 });
   const [selected, setSelected] = useState(COINS[0]);
   const [stopPct, setStopPct] = useState("1.5");
   const [backtestResult, setBacktestResult] = useState(null);
@@ -770,6 +782,10 @@ export default function App() {
 
   const realized = useMemo(() => dailyRealizedPnL(trades), [trades]);
   const winRate = useMemo(() => dailyWinRate(trades), [trades]);
+  const walletInfo = useMemo(
+    () => computeWallet(trades, parseFloat(userCfg.walletPct) || 0),
+    [trades, userCfg.walletPct]
+  );
   const cap = parseFloat(userCfg.capital) || 0;
   const dailyLimit = cap * (CONFIG.risk.dailyLossLimitPct / 100);
   const tradingHalted = realized <= -dailyLimit;
@@ -1069,6 +1085,16 @@ export default function App() {
           </div>
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={labelStyle}>💰 نسبة الأرباح للصندوق %</span>
+            <input
+              type="number"
+              style={inputStyle}
+              value={userCfg.walletPct}
+              onChange={(e) => setUserCfg((c) => ({ ...c, walletPct: e.target.value }))}
+            />
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <span style={labelStyle}>وقف الخسارة %</span>
             <input
               type="number"
@@ -1082,6 +1108,12 @@ export default function App() {
             <Stat label="حد خسارة اليوم" value={`$${dailyLimit.toFixed(2)}`} />
             <Stat label="خسارة اليوم" value={`$${realized.toFixed(2)}`} muted={realized < 0} />
             <Stat label="صفقات مفتوحة" value={`${openCount}/${CONFIG.risk.maxOpenTrades}`} />
+          </div>
+
+          <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+            <Stat label="💰 صندوق الأرباح" value={`$${walletInfo.wallet.toFixed(2)}`} />
+            <Stat label="إجمالي الأرباح" value={`$${walletInfo.totalProfit.toFixed(2)}`} />
+            <Stat label="إجمالي الخسائر" value={`$${walletInfo.totalLoss.toFixed(2)}`} muted />
           </div>
 
           {winRate.total > 0 && (
